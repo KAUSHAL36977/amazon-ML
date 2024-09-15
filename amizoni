@@ -1,0 +1,145 @@
+# !wget https://d8it4huxumps7.cloudfront.net/files/66e31d6ee96cd_student_resource_3.zip
+# !unzip 66e31d6ee96cd_student_resource_3.zip
+# !pip install tensorflow keras pandas opencv-python requests
+import pandas as pd
+import os
+import numpy as np
+import cv2
+import requests
+import concurrent.futures
+from tqdm import tqdm  # For progress tracking
+
+
+from tensorflow.keras.applications import ResNet50
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import Dense, Flatten, Dropout
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from tensorflow.keras.optimizers import Adam
+
+DATASET_FOLDER = 'dataset/'
+train = pd.read_csv(os.path.join(DATASET_FOLDER, 'train.csv'))
+test = pd.read_csv(os.path.join(DATASET_FOLDER, 'test.csv'))
+sample_test = pd.read_csv(os.path.join(DATASET_FOLDER, 'sample_test.csv'))
+sample_test_out = pd.read_csv(os.path.join(DATASET_FOLDER, 'sample_test_out.csv'))
+
+
+merged_df = pd.merge(sample_test, sample_test_out, left_index=True, right_index=True)
+
+
+
+merged_df = merged_df.drop(columns=['index_x', 'index_y'])
+merged_df = merged_df.rename(columns={'prediction': 'entity_value'})
+
+merged_df
+
+
+
+!python sanity.py --test_filename dataset/sample_test.csv --output_filename dataset/sample_test_out.csv
+
+
+
+def download_image(url, img_size=(224, 224)):
+    try:
+        resp = requests.get(url, stream=True, timeout=10).raw
+        img = np.asarray(bytearray(resp.read()), dtype="uint8")
+        img = cv2.imdecode(img, cv2.IMREAD_COLOR)
+        img = cv2.resize(img, img_size)
+        img = img / 255.0  # Normalize
+        return img
+    except Exception as e:
+        print(f"Failed to download image from {url}: {e}")
+        return None
+
+# Download images concurrently
+def download_images_concurrently(image_urls, max_workers=8):
+    images = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Use tqdm for tracking progress
+        results = list(tqdm(executor.map(download_image, image_urls), total=len(image_urls)))
+        for img in results:
+            if img is not None:
+                images.append(img)
+    return np.array(images)
+
+# train_df = pd.read_csv('dataset/train.csv')
+
+train_images = download_images_concurrently(merged_df['image_link'].tolist(), max_workers=16)
+
+labels = np.array(merged_df['entity_value'])
+
+
+
+
+# Split entity_value into numeric and unit parts
+numeric_values = []
+units = []
+for label in labels:
+    # Check if the label is a string before splitting
+    if isinstance(label, str):
+        parts = label.split()
+        numeric_values.append(float(parts[0]))
+        units.append(parts[1])
+    # Handle NaN values
+    else:
+        numeric_values.append(np.nan) # or any other suitable value
+        units.append('unknown') # or any other suitable value
+
+numeric_values = np.array(numeric_values)
+units = pd.get_dummies(units).values  # One-hot encode units
+
+
+
+
+# Data augmentation for training
+datagen = ImageDataGenerator(rotation_range=20, zoom_range=0.15, width_shift_range=0.2, height_shift_range=0.2, shear_range=0.15, horizontal_flip=True, fill_mode="nearest")
+
+# Fit the model
+history = model.fit(datagen.flow(train_images, [numeric_values, units], batch_size=32),
+                    epochs=10, validation_split=0.2)
+
+
+
+
+# Load test data
+test_df = pd.read_csv('dataset/test.csv')
+test_images = []
+
+for index, row in test_df.iterrows():
+    img = download_image(row['image_link'])
+    if img is not None:
+        test_images.append(img)
+
+test_images = np.array(test_images)
+
+# Make predictions on the test set
+pred_numeric, pred_unit = model.predict(test_images)
+
+# Convert predictions back to the original format (e.g., "x unit")
+predicted_units = np.argmax(pred_unit, axis=1)  # Get the index of the predicted unit
+unit_labels = pd.get_dummies(train_df['entity_value'].str.split().str[1]).columns  # Unit labels from training
+
+# Prepare output
+output = []
+for i in range(len(pred_numeric)):
+    num = round(pred_numeric[i][0], 2)  # Format to 2 decimal places
+    unit = unit_labels[predicted_units[i]]  # Get the predicted unit
+    output.append(f"{num} {unit}")
+
+# Save to CSV file
+test_df['prediction'] = output
+test_df[['index', 'prediction']].to_csv('test_out.csv', index=False)
+
+
+
+
+
+# python src/sanity.py --output_file test_out.csv
+
+
+
+
+
+
+
+
+
